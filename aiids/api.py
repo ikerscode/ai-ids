@@ -16,6 +16,7 @@ from . import NAME, __version__, config, datasets, pipeline
 from .correlate import Correlator
 from .ingest import ExternalAlert, schema_doc, to_alert
 from .models import load_bundle
+from .schema import is_known_ip
 from .store import Store
 from .stream import Streamer
 
@@ -224,14 +225,16 @@ def feedback(alert_id: int, req: FeedbackReq):
     store.set_status(alert_id, req.verdict)
     if a.get("dataset") and a.get("rows"):
         store.add_labelled_flows(alert_id, a["dataset"], a["rows"], req.verdict, a["alert_class"])
-    rule_id = None
-    if req.verdict == "fp" and req.suppress != "none":
-        rule = {"src_ip": a["src_ip"] or "*", "alert_class": a["alert_class"],
+    rule_id, note = None, None
+    if req.verdict == "fp" and req.suppress != "none" and not is_known_ip(a.get("src_ip")):
+        note = "no suppression rule: alert has no usable source IP, so a rule would hide this class for every source"
+    elif req.verdict == "fp" and req.suppress != "none":
+        rule = {"src_ip": a["src_ip"], "alert_class": a["alert_class"],
                 "reason": f"analyst FP on alert {alert_id}" + (f": {req.note}" if req.note else "")}
         if req.suppress == "exact":
             rule.update({"dst_ip": a["dst_ip"] or "*", "dst_port": a["dst_port"] or "*"})
         rule_id = store.add_rule(rule)
-    return {"ok": True, "rule_id": rule_id, "labelled_flows": len(a.get("rows") or [])}
+    return {"ok": True, "rule_id": rule_id, "note": note, "labelled_flows": len(a.get("rows") or [])}
 
 
 @app.post("/api/alerts/clear")

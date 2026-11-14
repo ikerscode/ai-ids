@@ -312,6 +312,31 @@ speed are in the Live tab and at `/api/stream/*`; `python -m aiids stream` print
    capped per class).
 3. `python -m aiids train --dataset cic-wed` then `python -m aiids evaluate --dataset cic-wed`.
 
+### Results on CIC-IDS2017 (MachineLearningCVE, all eight days)
+
+Sample: up to 40k benign and 20k per attack label from each day file, then the loader's own cap (300k rows:
+210k benign, attacks capped per family), giving 248,028 flows. Random stratified split, test = 62,010 flows.
+These CSVs have no IPs or timestamps, so per-host baselines, context features and correlation are inactive.
+
+| Stage | Precision | Recall | FPR | PR-AUC | False alerts/h |
+|---|---|---|---|---|---|
+| naive | 0.709 | 0.994 | 0.0741 | 0.955 | 3336 |
+| calibrated | 0.974 | 0.955 | 0.0046 | 0.945 | 205 |
+| + agreement | 0.976 | 0.955 | 0.0043 | 0.947 | 194 |
+| + analyst feedback | 0.977 | 0.952 | 0.0041 | 0.949 | 186 |
+| + aggregation (alert level) | | | | | 12.9 |
+
+Known attacks are caught well once thresholds are calibrated. Unseen attacks are not: with one family held
+out of the classifier, the anomaly layer flagged 2.2% of DoS, 0.1% of port scan, 0% of brute force and 0%
+of botnet flows (heartbleed 3/3 and infiltration 2/9 were caught, but those counts are tiny). On this data
+the benign-trained detectors cannot separate short scan and login flows from normal short flows, which
+matches what published work on CIC-IDS2017 reports. The simulator's leave-one-family-out table above is
+therefore far more optimistic than real traffic.
+
+This run also exposed a bug, now fixed: with no IPs every flow has source 0.0.0.0, so a feedback rule
+"suppress class X from 0.0.0.0" muted that class for everyone and recall fell to 0.36. Feedback no longer
+creates rules for unknown sources (evaluation and the HUD button), and a test covers it.
+
 UNSW-NB15 works the same way with either the 49-column raw files or the training/testing-set CSVs. For
 public datasets the split is random and stratified, so it is easier than the simulator's day-based split
 (flows from the same attack sit on both sides), and the host-log and correlation parts have nothing to work

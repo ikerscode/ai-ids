@@ -46,6 +46,15 @@ def test_suppression_rule(small_sim, small_bundle):
     assert res2.suppressed.sum() > 0 and res2.alert.sum() < res.alert.sum()
 
 
+def test_no_rules_for_unknown_source(small_sim, small_bundle):
+    # Public CSVs without IPs map every flow to 0.0.0.0; a rule on that source would mute a whole class.
+    flows = small_sim[0]
+    fb = flows[flows.split == "feedback"].assign(src_ip="0.0.0.0")
+    res = Engine(small_bundle, [], "host_adaptive").detect(fb)
+    rules, _ = analyst_oracle(fb, res, min_count=1)
+    assert rules == []
+
+
 def test_explanations(small_sim, small_bundle):
     flows = small_sim[0]
     test = flows[flows.split == "test"]

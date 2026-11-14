@@ -17,7 +17,7 @@ from . import config
 from .alerts import Aggregator, flow_hits, group_to_alert
 from .engine import STAGES, UNKNOWN, Engine
 from .models import ModelBundle, train_bundle
-from .schema import BENIGN
+from .schema import BENIGN, is_known_ip
 from .supervised import SupervisedDetector
 
 STAGE_TEXT = {
@@ -87,8 +87,8 @@ def analyst_oracle(df: pd.DataFrame, res: pd.DataFrame, max_rules: int = 5, min_
     rules = []
     if len(fp):
         for (src, cls), g in sorted(fp.groupby(["src_ip", "alert_class"]), key=lambda kv: -len(kv[1]))[:max_rules]:
-            if len(g) < min_count:
-                continue
+            if len(g) < min_count or not is_known_ip(src):
+                continue  # no rule for an unknown source: it would suppress the class for everyone
             rules.append({"id": f"auto{len(rules) + 1}", "src_ip": src,
                           "dst_ip": g["dst_ip"].iloc[0] if g["dst_ip"].nunique() == 1 else "*",
                           "dst_port": int(g["dst_port"].iloc[0]) if g["dst_port"].nunique() == 1 else "*",

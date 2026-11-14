@@ -89,6 +89,19 @@ def is_internal(ip: str) -> bool:
     return any(addr in net for net in INTERNAL_NETS if net.version == addr.version)
 
 
+def is_known_ip(ip) -> bool:
+    """False for missing or placeholder addresses (e.g. CSV datasets without IPs).
+
+    A suppression rule keyed on an unknown source would match every flow, so
+    feedback must never turn one into a rule.
+    """
+    try:
+        addr = ipaddress.ip_address(str(ip).strip())
+    except ValueError:
+        return False
+    return not addr.is_unspecified
+
+
 def flow_features(ts, sizes, fwd, flags, proto: int, dst_port: int) -> dict:
     """Compute FLOW_FEATURES from the packets of one flow.
 
