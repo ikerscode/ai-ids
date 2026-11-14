@@ -1,0 +1,12 @@
+# All of these are reused from the system site-packages when the venv is created
+# with --system-site-packages; pip only installs what is missing.
+numpy
+pandas
+scikit-learn
+joblib
+fastapi
+uvicorn
+pydantic
+scapy
+pytest
+httpx

@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-ids</title>
+<link rel="stylesheet" href="/static/hud.css">
+<style>
+  .kv td:first-child { color: var(--muted); width: 38%; }
+  tr.click { cursor: pointer; }
+  tr.sel td { background: #2a1414; }
+  #status { font-size: 12px; }
+  .log { max-height: 160px; font-size: 11px; }
+</style>
+</head>
+<body>
+<header class="hud">
+  <span class="brand">ai-ids</span>
+  <span class="sub" id="status">loading...</span>
+  <nav>
+    <button data-view="live">Live alerts</button>
+    <button data-view="incidents">Incidents</button>
+    <button data-view="models">Models &amp; data</button>
+  </nav>
+</header>
+<main>
+  <!-- ============================== LIVE ============================== -->
+  <section class="view" id="live">
+    <div class="grid">
+      <div class="panel span-12">
+        <h2>Stream / detect</h2>
+        <div class="row">
+          <label>dataset <select id="ds"></select></label>
+          <label>split <select id="split"><option>test</option><option>all</option><option>feedback</option><option>val</option></select></label>
+          <label>speed <input id="speed" type="number" value="600" min="1" max="20000" style="width:90px"> x</label>
+          <button class="btn primary" id="btnStart">Start stream</button>
+          <button class="btn" id="btnStop">Stop</button>
+          <button class="btn" id="btnSpeed">Set speed</button>
+          <button class="btn" id="btnDetect">Batch-detect split</button>
+          <button class="btn danger" id="btnClear">Clear alerts</button>
+        </div>
+        <p class="muted" id="streamInfo"></p>
+        <div id="rate"></div>
+      </div>
+      <div class="panel span-6">
+        <h2>Alerts</h2>
+        <div class="row">
+          <input id="fq" placeholder="ip / host / text" style="width:150px">
+          <select id="fcls"><option value="">any class</option></select>
+          <select id="fsev"><option value="">any severity</option><option>critical</option><option>high</option><option>medium</option><option>low</option></select>
+          <select id="fstatus"><option value="">any status</option><option>open</option><option>fp</option><option>tp</option></select>
+        </div>
+        <div class="scroll" id="alerts" style="max-height:640px"></div>
+      </div>
+      <div class="panel span-6">
+        <h2>Explanation</h2>
+        <div id="detail"><p class="muted">Click an alert.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== INCIDENTS ============================== -->
+  <section class="view" id="incidents">
+    <div class="grid">
+      <div class="panel span-12">
+        <h2>Correlated incidents</h2>
+        <div class="scroll" id="incTable"></div>
+      </div>
+      <div class="panel span-6">
+        <h2>Timeline</h2>
+        <div id="incInfo" class="muted">Click an incident.</div>
+        <div class="scroll" id="incTimeline"></div>
+      </div>
+      <div class="panel span-6">
+        <h2>Entity graph</h2>
+        <div id="incGraph"></div>
+      </div>
+      <div class="panel span-12">
+        <h2>Test external ingestion (POST /api/ingest)</h2>
+        <p class="muted">Paste an alert from another system (honeypot-net, ics-sim, malware-lab). "Use top incident" fills in the attacker IP of the highest-scoring incident so you can watch it correlate.</p>
+        <div class="row">
+          <button class="btn" id="btnSample">Load sample</button>
+          <button class="btn" id="btnSampleInc">Use top incident</button>
+          <button class="btn primary" id="btnIngest">Send</button>
+          <a href="/api/ingest/schema" target="_blank">schema</a>
+        </div>
+        <textarea id="ingestBody" style="min-height:160px"></textarea>
+        <pre id="ingestOut" class="muted">-</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== MODELS & DATA ============================== -->
+  <section class="view" id="models">
+    <div class="grid">
+      <div class="panel span-6">
+        <h2>Data</h2>
+        <div class="row">
+          <button class="btn primary" id="btnSim">Generate simulated dataset</button>
+          <label>scale <input id="simScale" type="number" value="1" step="0.1" min="0.05" max="2" style="width:70px"></label>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <input type="file" id="upFile" accept=".pcap,.pcapng,.cap,.csv">
+          <button class="btn" id="btnUpload">Upload pcap / CSV</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label>active <select id="dsActive"></select></label>
+          <button class="btn" id="btnActive">Use dataset</button>
+        </div>
+        <div id="dsStats" style="margin-top:8px"></div>
+      </div>
+      <div class="panel span-6">
+        <h2>Models</h2>
+        <div class="row">
+          <button class="btn primary" id="btnTrain">Train / retrain (uses feedback)</button>
+          <button class="btn" id="btnEval">Evaluate (ablation + held-out families)</button>
+        </div>
+        <pre class="log" id="jobLog">no job yet</pre>
+        <div id="modelInfo"></div>
+      </div>
+      <div class="panel span-12">
+        <h2>False-positive reduction ablation (test split)</h2>
+        <div id="ablation"></div>
+      </div>
+      <div class="panel span-12">
+        <h2>Unseen attacks: leave-one-family-out</h2>
+        <div id="lofo"></div>
+      </div>
+      <div class="panel span-6">
+        <h2>Per-class results (test split)</h2>
+        <div id="perFamily"></div>
+      </div>
+      <div class="panel span-6">
+        <h2>Confusion matrix (rows = truth)</h2>
+        <div class="scroll" id="confusion"></div>
+      </div>
+      <div class="panel span-6">
+        <h2>Thresholds</h2>
+        <div id="thresholds"></div>
+      </div>
+      <div class="panel span-6">
+        <h2>Suppression rules</h2>
+        <div id="rules"></div>
+      </div>
+    </div>
+  </section>
+</main>
+<script src="/static/hud.js"></script>
+<script src="/static/app.js?v=2"></script>
+</body>
+</html>
