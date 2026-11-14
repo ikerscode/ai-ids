@@ -86,6 +86,12 @@ def cmd_serve(a):
     uvicorn.run("aiids.api:app", host=a.host, port=a.port, log_level="warning")
 
 
+def cmd_tui(a):
+    from . import termhud
+    from .tui_spec import SPEC
+    return termhud.run(SPEC, a.url, a.once)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="python -m aiids", description="ML intrusion detection lab")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -126,8 +132,13 @@ def main(argv=None):
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=config.PORT)
     s.set_defaults(fn=cmd_serve)
+    s = sub.add_parser("tui", help="terminal HUD over the running API")
+    s.add_argument("--url", default=f"http://127.0.0.1:{config.PORT}")
+    s.add_argument("--once", action="store_true", help="print every view once as plain text and exit")
+    s.set_defaults(fn=cmd_tui)
     a = p.parse_args(argv)
-    a.fn(a)
+    rc = a.fn(a)
+    return rc or 0
 
 
 if __name__ == "__main__":

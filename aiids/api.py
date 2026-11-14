@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
+from .localguard import LocalGuard
 from . import NAME, __version__, config, datasets, pipeline
 from .correlate import Correlator
 from .ingest import ExternalAlert, schema_doc, to_alert
@@ -24,6 +25,8 @@ STATIC = config.ROOT / "static"
 MAX_UPLOAD = 300 * 1024 * 1024
 
 app = FastAPI(title="ai-ids", version=__version__)
+
+app.add_middleware(LocalGuard)  # localhost-only: host allowlist, CSRF block, CSP
 store = Store()
 streamer = Streamer(store)
 _incident_cache: dict = {"version": -1, "incidents": []}

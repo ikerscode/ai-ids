@@ -295,6 +295,18 @@ speed are in the Live tab and at `/api/stream/*`; `python -m aiids stream` print
   (uses analyst feedback) and evaluate; the ablation table, the leave-one-family-out table, per-class
   results, confusion matrix, thresholds and suppression rules.
 
+## Terminal HUD
+
+`python -m aiids tui` draws a terminal dashboard over the running API (start `./run.sh` first). It shows
+alerts, incidents, model metrics and status, and it has the same stream, generate, detect, train and
+evaluate controls as the web HUD. Use `--url` to point it at another address.
+
+Keys: `1`-`9` or `Tab` switch views, arrows move the selection, `Enter` opens the detail (alert
+explanation or incident), `Esc` goes back, `s` start stream, `x` stop stream, `g` generate dataset,
+`d` batch detect, `t` train and `e` evaluate (`g`, `t` and `e` ask `y/N` first), `q` quits.
+
+Over SSH or in a script, `python -m aiids tui --once` prints every view once as plain text and exits.
+
 ## API
 
 `GET /api/health`, `/api/status`, `/api/datasets`, `/api/datasets/{name}`, `/api/models`, `/api/alerts`,

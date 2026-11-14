@@ -1,3 +1,7 @@
+import os
+
+os.environ.setdefault("SECLAB_ALLOWED_HOSTS", "testserver")  # FastAPI TestClient host
+
 """Shared fixtures. Tests use a temporary data dir so they never touch data/."""
 import sys
 from pathlib import Path

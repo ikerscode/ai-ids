@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Start the ai-ids HUD/API on 127.0.0.1:8105 (creates the venv on first run).
+umask 077  # data (captured credentials, samples, intel) is private to this user
 set -euo pipefail
 cd "$(dirname "$0")"
 if [ ! -x .venv/bin/python ]; then
