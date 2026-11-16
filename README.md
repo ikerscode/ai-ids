@@ -1,3 +1,5 @@
+[![tests](https://github.com/ikerscode/ai-ids/actions/workflows/tests.yml/badge.svg)](https://github.com/ikerscode/ai-ids/actions/workflows/tests.yml)
+
 # ai-ids
 
 A machine-learning intrusion detection system for the seclab. It turns network traffic into flows, scores
@@ -348,6 +350,89 @@ therefore far more optimistic than real traffic.
 This run also exposed a bug, now fixed: with no IPs every flow has source 0.0.0.0, so a feedback rule
 "suppress class X from 0.0.0.0" muted that class for everyone and recall fell to 0.36. Feedback no longer
 creates rules for unknown sources (evaluation and the HUD button), and a test covers it.
+
+### Results on CIC-IDS2017 TrafficLabelling (with IPs and timestamps)
+
+The section above is the "before". This is the same pipeline on the GeneratedLabelledFlows CSVs, which keep
+source/destination IPs, ports and timestamps (2,830,743 flows), so per-host baselines, the 20 new
+time-window features and correlation all run on real data.
+
+```bash
+python -m aiids ingest-cic-tl data/external/cic-ids2017-tl       # builds cic17tl, cic17tl-rand, cic17tl-days
+AIIDS_MODEL_DIR=data/models.cic17tl python -m aiids benchmark      # all configurations, JSON in data/benchmarks/
+python -m aiids train --dataset cic17tl [--windows|--no-windows]   # train one configuration
+python -m aiids incidents --dataset cic17tl-days                    # incidents with the trained model
+```
+
+`AIIDS_MODEL_DIR` keeps these models apart from the simulator models the HUD uses.
+
+**Method.** Time split: the anomaly detectors train only on Monday benign traffic and benign traffic from
+before 09:10 on the later days (before any attack started). Only the first 30% in time of each attack label
+may train the supervised layer; everything later is test. Window features for a flow use only that flow and
+flows that arrived before it, in the window (t-W, t], with W of 10, 60 and 300 s. Tests check the vectorised
+code against a brute-force reference and prove that appending future flows never changes earlier rows.
+
+**Label errors.** CIC-IDS2017 labels some attack traffic as BENIGN (documented by Engelen et al., 2021): the
+infiltrated host 192.168.10.8 scanning the internal network on Thursday afternoon, and attacker/victim pair
+flows during attack episodes. These flows are tagged in a `label_note` column, never relabelled, and left
+out of benign training. Metrics are reported on the raw labels and again as "clean" with tagged flows
+excluded. About 89% of the raw "false positives" are on tagged flows.
+
+**Detection, time split** (199,974 test flows; final stage after analyst feedback and aggregation):
+
+| | windows off | windows on |
+|---|---|---|
+| Recall | 0.985 | 0.987 |
+| Precision, raw labels / clean | 0.803 / 0.982 | 0.796 / 0.977 |
+| FPR, raw labels / clean | 6.0% / 0.49% | 6.3% / 0.62% |
+| PR-AUC | 0.900 | 0.918 |
+| Alerts per hour after aggregation | 16.8 | 12.1 |
+
+**Unseen attacks** (leave-one-family-out on the time split: the held-out family is removed from the
+supervised layer's training, so only the anomaly layer and other classes can catch it):
+
+| Held-out family | Before (MachineLearningCVE, anomaly layer) | Windows off: caught / by anomaly layer | Windows on: caught / by anomaly layer |
+|---|---|---|---|
+| Port scan | 0.1% | 0.8% / 0.2% | **99.7% / 99.7%** |
+| DoS | 2.2% | 76.1% / 51.0% | **97.6% / 95.3%** |
+| FTP brute force | 0% | 98.5% / 0.0% | 100.0% / 41.8% |
+| SSH brute force | 0% | 92.2% / 0.0% | 94.4% / 3.8% |
+| Web attack | not measured | 99.9% / 0.0% | 98.2% / 14.2% |
+| Infiltration (26 flows) | 2 of 9 flows | 92.3% / 92.3% | 88.5% / 88.5% |
+| Botnet | 0% | 2.0% / 0.4% | **0.1% / 0.1%** |
+
+The time-window features are what changed the result: a never-seen port scan or DoS now stands out to the
+benign-trained anomaly layer because one host suddenly touches hundreds of ports or opens bursts of short
+flows. Brute force is still caught mostly by the supervised layer's other classes. Botnet traffic is not
+caught at all when unseen: its beacons look like normal low-volume client traffic at these window sizes.
+
+**Incidents on the full test days** (cic17tl-days: every benign flow from Tuesday to Friday plus the sampled
+attacks, 1,741,563 flows over 31.6 h of capture):
+
+| | windows off | windows on |
+|---|---|---|
+| Attack campaigns that became an incident | 14 of 14 | 14 of 14 |
+| Alerts after aggregation | 3,835 | 2,367 |
+| False alerts per hour | 119.7 | 73.2 |
+| False incidents (low / medium / high) | 281 (276 / 4 / 1) | 267 (260 / 6 / 1) |
+
+Every attack day collapses into one critical incident per day keyed on the attacker (mostly 172.16.0.1, the
+firewall's NAT address). With windows off, Tuesday's FTP-Patator was only a medium incident; with windows on
+it joined the critical one. False incidents are almost all low severity, but 73 false alerts per hour is
+still far too many for a real SOC: this is drift between Monday's baseline and the later days (clean benign
+FPR 0.6 to 1.2% per day), not label noise.
+
+**Random split, for comparison** (windows off only; the windows-on random-split run was stopped to free the
+machine and is not reported): final precision 0.992, recall 0.991, FPR 0.15%. These look far better because
+flows from the same attack episodes sit in both train and test. Unseen-family detection on the random split
+was weak (port scan 0.7%, DoS 31.6%, botnet 0%), which is why the time split is the result to quote.
+
+**Limitations of this evaluation.** Timestamps have minute resolution, so flows are spread evenly inside each
+minute in recording order; on Monday that order correlates only 0.44 with the true seconds (median error
+17 s), so the 10 s windows are approximate while 60 s and 300 s are robust. CICFlowMeter sometimes reverses
+flow direction. Most attacks come from one NAT address, which makes correlation easier than in a real
+network. Metrics on the sampled test mix differ from the full capture; the JSON also stores re-weighted
+`_w` metrics. Only one dataset was evaluated; UNSW-NB15 was not attempted in this round.
 
 UNSW-NB15 works the same way with either the 49-column raw files or the training/testing-set CSVs. For
 public datasets the split is random and stratified, so it is easier than the simulator's day-based split
