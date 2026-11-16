@@ -25,6 +25,15 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 EVENT_COLUMNS = ["ts", "host", "sensor", "event", "user", "src_ip", "detail", "label", "campaign", "split"]
 
 
+def _epoch_seconds(ts: pd.Series) -> pd.Series:
+    """Datetime series -> float seconds since 1970 (NaN for NaT).
+
+    Independent of the datetime unit, which changed from nanoseconds (pandas 2) to
+    microseconds (pandas 3), so integer division by 10**9 is not safe.
+    """
+    return (ts - pd.Timestamp("1970-01-01")) / pd.Timedelta(seconds=1)
+
+
 def safe_name(name: str) -> str:
     name = re.sub(r"[^a-z0-9_-]+", "-", name.lower()).strip("-")[:48] or "dataset"
     if not NAME_RE.match(name):
@@ -152,7 +161,7 @@ def load_cic(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     has_time = "Timestamp" in df and "Source IP" in df
     if has_time:
         ts = pd.to_datetime(df["Timestamp"], errors="coerce", dayfirst=True, format="mixed")
-        out["ts"] = (ts.astype("int64") // 10**9).astype(float).where(ts.notna(), np.nan)
+        out["ts"] = _epoch_seconds(ts)
         out["ts"] = out["ts"].ffill().fillna(0) + np.arange(len(out)) * 1e-6
     else:
         out["ts"] = np.arange(len(out), dtype=float) * 0.01
@@ -204,9 +213,10 @@ def parse_cic_timestamp(ts: pd.Series, row_order: np.ndarray | None = None) -> n
     p = p.fillna(0).astype(np.int64)
     hour = p[3].to_numpy()
     hour = np.where(hour < FIRST_CAPTURE_HOUR, hour + 12, hour)
-    days = (pd.to_datetime(pd.DataFrame({"year": p[2].where(ok, 1970), "month": p[1].where(ok, 1).clip(1, 12),
-                                         "day": p[0].where(ok, 1).clip(1, 31)}), errors="coerce")
-            .astype("int64") // 10**9).to_numpy()
+    days = _epoch_seconds(pd.to_datetime(pd.DataFrame({"year": p[2].where(ok, 1970),
+                                                      "month": p[1].where(ok, 1).clip(1, 12),
+                                                      "day": p[0].where(ok, 1).clip(1, 31)}),
+                                         errors="coerce")).to_numpy()
     minute = (days + hour * 3600 + p[4].to_numpy() * 60).astype(float)
     minute = np.where(ok, minute, np.nan)
     if row_order is None:
