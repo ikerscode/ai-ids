@@ -1,4 +1,5 @@
-"""Command line: python -m aiids {simulate,train,evaluate,stream,detect,ingest-pcap,ingest-csv,serve}."""
+"""Command line: python -m aiids {simulate,train,evaluate,stream,detect,ingest-pcap,ingest-csv,ingest-cic-tl,
+incidents,benchmark,serve,tui}."""
 from __future__ import annotations
 
 import argparse
@@ -26,12 +27,12 @@ def cmd_simulate(a):
 def cmd_train(a):
     from .pipeline import train_models
     from .store import Store
-    train_models(a.dataset, Store())
+    train_models(a.dataset, Store(), windows=a.windows)
 
 
 def cmd_evaluate(a):
     from .pipeline import evaluate_models
-    out = evaluate_models(a.dataset, lofo=not a.no_lofo)
+    out = evaluate_models(a.dataset, lofo=not a.no_lofo, windows=a.windows)
     print("\nFP-reduction ablation (test split, %d flows, %.1f h):" % (out["test_flows"], out["test_hours"]))
     print(_table(out["ablation"], ["stage", "precision", "recall", "fpr", "pr_auc", "alerts_per_hour",
                                    "false_alerts_per_hour", "step_recall"]))
@@ -81,6 +82,32 @@ def cmd_ingest_csv(a):
     print(json.dumps(ingest_csv(a.file, a.name, a.max_rows), indent=1, default=str))
 
 
+def cmd_ingest_cic_tl(a):
+    from .pipeline import ingest_cic_tl
+    print(json.dumps(ingest_cic_tl(a.directory, a.name), indent=1))
+
+
+def cmd_incidents(a):
+    from .pipeline import incident_report
+    out = incident_report(a.dataset, a.split)
+    print(_table(out["campaigns"], ["campaign", "flows", "flows_alerted", "alerts", "incidents", "best_incident",
+                                    "best_severity", "best_stages"]))
+    print(f"\n{out['alerts']} alerts ({out['false_alerts']} false, {out['false_alerts_per_hour']}/h), "
+          f"{out['incidents']} incidents, {out['false_incidents']} without any attack alert "
+          f"{out['false_incidents_by_severity']}")
+
+
+def cmd_benchmark(a):
+    from .pipeline import benchmark_cic
+    out = benchmark_cic(a.name, lofo=not a.no_lofo, incidents=not a.no_incidents)
+    for run in out["runs"]:
+        print(f"\n{run['split']} split, window features {'on' if run['window_features'] else 'off'}:")
+        print(_table(run["ablation"], ["stage", "precision", "recall", "fpr", "precision_w", "fpr_w"]))
+        if run["lofo"]:
+            print(_table(run["lofo"], ["held_out", "test_flows", "recall_when_trained", "recall_held_out",
+                                       "via_anomaly_layer", "benign_fpr"]))
+
+
 def cmd_serve(a):
     import uvicorn
     uvicorn.run("aiids.api:app", host=a.host, port=a.port, log_level="warning")
@@ -105,6 +132,10 @@ def main(argv=None):
                             ("evaluate", cmd_evaluate, "ablation + leave-one-family-out evaluation")):
         s = sub.add_parser(name, help=help_)
         s.add_argument("--dataset", default="sim")
+        w = s.add_mutually_exclusive_group()
+        w.add_argument("--windows", dest="windows", action="store_true", default=None,
+                       help="use the time-window features (default: when the dataset has them)")
+        w.add_argument("--no-windows", dest="windows", action="store_false")
         if name == "evaluate":
             s.add_argument("--no-lofo", action="store_true")
         s.set_defaults(fn=fn)
@@ -128,6 +159,19 @@ def main(argv=None):
     s.add_argument("--name")
     s.add_argument("--max-rows", type=int, default=200_000)
     s.set_defaults(fn=cmd_ingest_csv)
+    s = sub.add_parser("ingest-cic-tl", help="CIC-IDS2017 TrafficLabelling folder -> time-split datasets")
+    s.add_argument("directory")
+    s.add_argument("--name", default="cic17tl")
+    s.set_defaults(fn=cmd_ingest_cic_tl)
+    s = sub.add_parser("incidents", help="detect + correlate a split in memory, report which campaigns became incidents")
+    s.add_argument("--dataset", default="cic17tl-days")
+    s.add_argument("--split", default="test")
+    s.set_defaults(fn=cmd_incidents)
+    s = sub.add_parser("benchmark", help="CIC-IDS2017 window-feature ablation on the time and random splits")
+    s.add_argument("--name", default="cic17tl")
+    s.add_argument("--no-lofo", action="store_true")
+    s.add_argument("--no-incidents", action="store_true")
+    s.set_defaults(fn=cmd_benchmark)
     s = sub.add_parser("serve", help="start the HUD/API")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=config.PORT)

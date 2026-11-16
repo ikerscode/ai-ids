@@ -164,6 +164,255 @@ def load_cic(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return out, {"format": "cic-ids2017", "has_time_and_ips": bool(has_time), "missing_features": missing}
 
 
+# --------------------------------------------------------------------------- CIC-IDS2017 TrafficLabelling
+# The "GeneratedLabelledFlows" / TrafficLabelling CSVs keep Flow ID, IPs, ports and the
+# flow start Timestamp. Their quirks, and how they are handled here:
+#   * labels contain a raw 0x96 byte (cp1252 en dash, "Web Attack \x96 Brute Force"): files
+#     are read as Latin-1 (never fails) and dash look-alikes are folded to "-"
+#   * "Fwd Header Length" appears twice (pandas reads the copy as "Fwd Header Length.1");
+#     neither is used, only the columns in CIC_MAP are read
+#   * Thursday-WorkingHours-Morning-WebAttacks ends with ~288k empty rows: dropped
+#   * "Flow Bytes/s" / "Flow Packets/s" hold Infinity and NaN, a few durations and IATs are
+#     negative: non-finite values become 0 and negatives are clipped to 0 in normalise()
+#   * timestamps are day-first (03/07/2017 = 3 July) on a 12-hour clock without AM/PM,
+#     and only Monday has seconds. See parse_cic_timestamp().
+TL_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+TL_COLUMNS = set(CIC_MAP) | {"Flow ID", "Source IP", "Source Port", "Destination IP", "Destination Port",
+                             "Protocol", "Timestamp", "Label"}
+FIRST_CAPTURE_HOUR = 8  # captures ran 08:42-17:10 local time; earlier clock hours are afternoon
+DASHES = str.maketrans({"\x96": "-", "–": "-", "—": "-", "�": "-"})
+
+
+def clean_label(raw) -> str:
+    return re.sub(r"\s+", " ", str(raw).translate(DASHES)).strip()
+
+
+def parse_cic_timestamp(ts: pd.Series, row_order: np.ndarray | None = None) -> np.ndarray:
+    """CIC Timestamp strings -> seconds (naive local time treated as UTC, so hour-of-day stays local).
+
+    * Day first: "4/7/2017 8:54" is 4 July 2017 (the capture week was 3-7 July).
+    * 12-hour clock with no AM/PM marker: the lab captured from about 08:40 to 17:10, so clock
+      hours 1-7 are 13:00-19:00 and 8-12 stay as they are. This fixes the afternoon files
+      (Thursday infiltration, Friday port scan and DDoS) that otherwise sort before the morning.
+    * Seconds: only Monday has them. Every day is cut to the minute so train (Monday) and test
+      days have the same resolution, then flows inside one minute are spread evenly over that
+      minute in recording order (row_order). Window features below one minute therefore use
+      an approximate position inside the minute; ordering never looks ahead.
+    """
+    p = ts.astype(str).str.extract(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2})")
+    ok = p.notna().all(axis=1).to_numpy()
+    p = p.fillna(0).astype(np.int64)
+    hour = p[3].to_numpy()
+    hour = np.where(hour < FIRST_CAPTURE_HOUR, hour + 12, hour)
+    days = (pd.to_datetime(pd.DataFrame({"year": p[2].where(ok, 1970), "month": p[1].where(ok, 1).clip(1, 12),
+                                         "day": p[0].where(ok, 1).clip(1, 31)}), errors="coerce")
+            .astype("int64") // 10**9).to_numpy()
+    minute = (days + hour * 3600 + p[4].to_numpy() * 60).astype(float)
+    minute = np.where(ok, minute, np.nan)
+    if row_order is None:
+        row_order = np.arange(len(minute))
+    out = minute.copy()
+    good = np.flatnonzero(ok)
+    if len(good):
+        m = pd.Series(minute[good])
+        rank = pd.Series(row_order[good]).groupby(m.to_numpy()).rank(method="first").to_numpy()
+        count = m.groupby(m.to_numpy()).transform("size").to_numpy()
+        out[good] = minute[good] + 60.0 * (rank - 1) / count
+    return out
+
+
+def read_cic_tl_file(path: str | Path) -> pd.DataFrame:
+    """One TrafficLabelling CSV -> raw frame with the columns this project uses (names stripped)."""
+    raw = pd.read_csv(path, encoding="latin-1", skipinitialspace=True, low_memory=False,
+                      usecols=lambda c: str(c).strip() in TL_COLUMNS)
+    raw = raw.rename(columns=lambda c: str(c).strip())
+    raw = raw.dropna(subset=["Flow ID", "Label"], how="all")
+    raw = raw[raw["Label"].notna() & raw["Timestamp"].notna()]
+    raw["Label"] = raw["Label"].map(clean_label)
+    return raw.reset_index(drop=True)
+
+
+def tl_day_files(directory: str | Path) -> dict[str, list[Path]]:
+    files = sorted(Path(directory).glob("*.csv"))
+    out = {}
+    for day in TL_DAYS:
+        fs = [f for f in files if f.name.lower().startswith(day.lower())]
+        # morning file first, then afternoon (port scan before DDoS on Friday)
+        key = lambda f: (0 if "morning" in f.name.lower() else 1, 0 if "portscan" in f.name.lower() else 1, f.name)
+        if fs:
+            out[day] = sorted(fs, key=key)
+    return out
+
+
+def load_cic_tl_day(files: list[Path], log=print) -> pd.DataFrame:
+    """All files of one capture day -> schema flows with context and window features.
+
+    Window features must see every flow of the day, so they are computed here, before
+    any downsampling. Files of one day are joined in capture order first so a window
+    can run across the morning/afternoon file boundary.
+    """
+    from .windows import add_window_features
+    parts = [read_cic_tl_file(f) for f in files]
+    raw = pd.concat(parts, ignore_index=True)
+    mapped, _ = load_cic(raw.drop(columns=["Timestamp"]))
+    mapped["ts"] = parse_cic_timestamp(raw["Timestamp"])
+    mapped["label_raw"] = raw["Label"].to_numpy()
+    mapped["label"] = mapped["label_raw"].map(map_label)
+    mapped = mapped[np.isfinite(mapped["ts"].to_numpy(float))]
+    mapped = mapped.replace([np.inf, -np.inf], np.nan)
+    label_raw = mapped["label_raw"].to_numpy()
+    mapped["campaign"] = [f"{files[0].name.split('-')[0].lower()}:{lab}" if lab.upper() != "BENIGN" else ""
+                          for lab in label_raw]
+    mapped["sensor"] = "cic2017:" + files[0].name.split("-")[0].lower()
+    mapped["_row"] = np.arange(len(mapped))
+    mapped = mapped.sort_values(["ts", "_row"], kind="stable").reset_index(drop=True)
+    label_raw = mapped["label_raw"].to_numpy()
+    flows = normalise(mapped, compute_context=True)  # keeps the time order (stable sort on ts)
+    flows["label_raw"] = label_raw
+    flows["label_note"] = tag_label_suspects(flows)
+    flows = add_window_features(flows)
+    log(f"  {files[0].name.split('-')[0]}: {len(flows)} flows, {int((flows['label'] != BENIGN).sum())} attack")
+    return flows
+
+
+LABEL_NOTE_MARGIN = 60.0
+
+
+def tag_label_suspects(flows: pd.DataFrame) -> np.ndarray:
+    """Mark BENIGN-labelled flows that are very probably part of an attack (one capture day).
+
+    CIC-IDS2017 labels some attack traffic as benign (Engelen et al., "Troubleshooting an
+    intrusion detection dataset: the CICIDS2017 case study", 2021). Two patterns are tagged:
+      * attack_pair: same two IP addresses as a labelled attack episode (one raw label), inside
+        that episode's time span +-60 s. These are mostly reply-direction and retried flows.
+      * post_infiltration: flows from the host that was infiltrated on Thursday, to internal
+        addresses, while the labelled infiltration was going on: its internal port scan.
+    Labels are not changed. Metrics are reported on the original labels, and again with these
+    flows left out ("clean benign"); benign-only training never uses them.
+    """
+    note = np.full(len(flows), "", dtype=object)
+    benign = (flows["label"] == BENIGN).to_numpy()
+    if benign.all():
+        return note
+    src, dst = flows["src_ip"].astype(str).to_numpy(), flows["dst_ip"].astype(str).to_numpy()
+    lo, hi = np.minimum(src, dst), np.maximum(src, dst)
+    ts = flows["ts"].to_numpy(float)
+    pair = pd.Series(lo) + "|" + pd.Series(hi)
+    att = pd.DataFrame({"pair": pair[~benign].to_numpy(), "ts": ts[~benign],
+                        "lab": flows["label_raw"].to_numpy()[~benign]})
+    spans = att.groupby(["lab", "pair"])["ts"].agg(["min", "max"]).reset_index()
+    pair_b = pair.to_numpy()
+    for p, g in spans.groupby("pair"):
+        m = benign & (pair_b == p)
+        if not m.any():
+            continue
+        inside = np.zeros(len(flows), dtype=bool)
+        for lo_t, hi_t in zip(g["min"], g["max"]):
+            inside |= (ts >= lo_t - LABEL_NOTE_MARGIN) & (ts <= hi_t + LABEL_NOTE_MARGIN)
+        note[m & inside] = "attack_pair"
+    inf = (flows["label"] == "infiltration").to_numpy()
+    if inf.any():
+        from .schema import is_internal
+        hosts = {h for h in src[inf] if is_internal(h)}
+        lo_t, hi_t = ts[inf].min() - LABEL_NOTE_MARGIN, ts[inf].max() + LABEL_NOTE_MARGIN
+        internal_dst = np.array([is_internal(d) for d in dst])
+        m = benign & np.isin(src, list(hosts)) & internal_dst & (ts >= lo_t) & (ts <= hi_t) & (note == "")
+        note[m] = "post_infiltration"
+    return note
+
+
+def time_split(flows: pd.DataFrame, day: str, early_cut_hour: float = 9 + 10 / 60,
+               monday_val: tuple = (14.5, 15.5), attack_train_frac: float = 0.3) -> np.ndarray:
+    """Time-respecting split for one day of CIC-IDS2017.
+
+    Monday (benign only): before 14:30 train, 14:30-15:30 val (threshold calibration),
+    after 15:30 feedback (the simulated analyst reviews that hour).
+    Tuesday-Friday: benign flows before 09:10, ahead of every attack, are train; everything
+    later is test, except the chronologically first 30% of each attack label, which the
+    supervised layer may learn from (as if those families had been seen earlier).
+    Anomaly detectors only ever train on benign flows from before any attack.
+    """
+    hour = (flows["ts"].to_numpy(float) % 86400) / 3600
+    benign = (flows["label"] == BENIGN).to_numpy()
+    split = np.full(len(flows), "test", dtype=object)
+    if day == "Monday":
+        split[:] = "train"
+        split[(hour >= monday_val[0]) & (hour < monday_val[1])] = "val"
+        split[hour >= monday_val[1]] = "feedback"
+        split[~benign] = "test"  # Monday has no attacks; keep any stray label out of training
+        return split
+    split[benign & (hour < early_cut_hour)] = "train"
+    lab = flows["label_raw"].to_numpy()
+    for raw_label in pd.unique(lab[~benign]):
+        idx = np.flatnonzero(lab == raw_label)  # flows are already in time order
+        split[idx[: int(len(idx) * attack_train_frac)]] = "train"
+    return split
+
+
+TL_CAPS = {("train", True): 70_000, ("train", False): 2_000, ("val", True): 20_000, ("feedback", True): 20_000,
+           ("test", True): 40_000, ("test", False): 5_000}
+
+
+def sample_with_weights(flows: pd.DataFrame, caps: dict = TL_CAPS, seed: int = 0) -> pd.DataFrame:
+    """Cap each (split, raw label) stratum; 'weight' = flows it stands for in the full capture."""
+    rng = np.random.default_rng(seed)
+    keep, weight = [], []
+    for (split, raw_label), idx in flows.groupby(["split", "label_raw"]).indices.items():
+        cap = caps.get((split, str(raw_label).upper() == "BENIGN"), 5_000)
+        take = idx if len(idx) <= cap else np.sort(rng.choice(idx, cap, replace=False))
+        keep.append(take)
+        weight.append(np.full(len(take), len(idx) / len(take)))
+    order = np.concatenate(keep)
+    out = flows.iloc[order].assign(weight=np.concatenate(weight))
+    return out.sort_values("ts", kind="stable").reset_index(drop=True)
+
+
+def _compact(df: pd.DataFrame) -> pd.DataFrame:
+    """float32 features and categorical strings: the full-benign test set is ~1.8M rows."""
+    from .schema import FEATURES
+    from .windows import WINDOW_FEATURES
+    cols = [c for c in FEATURES + WINDOW_FEATURES if c in df]
+    df[cols] = df[cols].astype(np.float32)
+    for c in ("src_host", "dst_host", "sensor", "label", "campaign", "split", "label_raw", "label_note"):
+        if c in df:
+            df[c] = df[c].astype("category")
+    return df
+
+
+def load_cic_tl(directory: str | Path, log=print, seed: int = 0, keep_test_days: bool = False):
+    """The five TrafficLabelling days -> one sampled dataset with a time-respecting split.
+
+    Returns (flows, meta), plus a third frame when keep_test_days is set: every benign test
+    flow (no cap) with the same attack cap, for realistic alert-rate and incident numbers.
+    """
+    days = tl_day_files(directory)
+    if not days:
+        raise FileNotFoundError(f"no CIC-IDS2017 TrafficLabelling CSVs in {directory}")
+    parts, full_counts, test_days, notes = [], {}, [], {}
+    for day, files in days.items():
+        flows = load_cic_tl_day(files, log=log)
+        flows["split"] = time_split(flows, day)
+        full_counts[day] = {str(k): int(v) for k, v in flows["label_raw"].value_counts().items()}
+        notes[day] = {str(k): int(v) for k, v in flows["label_note"].value_counts().items() if k}
+        parts.append(sample_with_weights(flows, seed=seed))
+        if keep_test_days and day != "Monday":
+            caps = {("test", True): 10**9, ("test", False): TL_CAPS[("test", False)]}
+            test_days.append(_compact(sample_with_weights(flows[flows["split"] == "test"], caps, seed=seed)))
+        del flows
+    out = pd.concat(parts, ignore_index=True).sort_values("ts", kind="stable").reset_index(drop=True)
+    meta = {"format": "cic-ids2017-trafficlabelling", "has_time_and_ips": True, "window_features": True,
+            "split_kind": "time", "full_counts": full_counts, "label_notes": notes, "missing_features": [],
+            "split_rule": time_split.__doc__.strip(), "caps": {f"{k[0]}/{'benign' if k[1] else 'attack'}": v
+                                                             for k, v in TL_CAPS.items()}}
+    if keep_test_days:
+        full = pd.concat(test_days, ignore_index=True) if test_days else out.iloc[:0]
+        for c in full.columns:
+            if isinstance(full[c].dtype, pd.CategoricalDtype):
+                full[c] = full[c].astype(object)  # shares the category strings, no copy per row
+        return out, meta, full.sort_values("ts", kind="stable").reset_index(drop=True)
+    return out, meta
+
+
 # --------------------------------------------------------------------------- UNSW-NB15
 UNSW_RAW_COLS = ["srcip", "sport", "dstip", "dsport", "proto", "state", "dur", "sbytes", "dbytes", "sttl", "dttl",
                  "sloss", "dloss", "service", "sload", "dload", "spkts", "dpkts", "swin", "dwin", "stcpb", "dtcpb",

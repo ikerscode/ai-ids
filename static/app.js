@@ -258,6 +258,18 @@ async function refreshModels() {
   }
 }
 
+async function refreshBench() {
+  const b = await api("/api/benchmarks");
+  renderTable("#bench", b.lofo, [
+    { key: "split" }, { key: "windows", label: "window features", render: (v) => (v ? "on" : "off") },
+    { key: "held_out", label: "family held out" }, { key: "test_flows", label: "test flows" },
+    { key: "recall_when_trained", label: "recall (trained on it)", render: pct },
+    { key: "recall_held_out", label: "recall (never seen)", render: pct },
+    { key: "via_anomaly_layer", label: "flagged by anomaly layer", render: pct },
+    { key: "benign_fpr", label: "benign FPR", render: (v) => num(v, 4) }],
+    { empty: "No benchmark yet. Run python -m aiids ingest-cic-tl <folder> then python -m aiids benchmark." });
+}
+
 async function refreshRules() {
   const r = await api("/api/rules");
   renderTable("#rules", r.rules, [
@@ -308,7 +320,7 @@ let currentView = "live";
 hud.initTabs((id) => {
   currentView = id;
   if (id === "incidents") refreshIncidents();
-  if (id === "models") { refreshDataset(); refreshModels(); refreshRules(); }
+  if (id === "models") { refreshDataset(); refreshModels(); refreshRules(); refreshBench(); }
 });
 loadSample(false);
 refreshStatus().then(() => { if (currentView === "models") refreshDataset(); });

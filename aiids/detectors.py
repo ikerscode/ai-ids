@@ -37,8 +37,8 @@ class IForestDetector:
 
 
 class AutoencoderDetector:
-    def __init__(self, seed: int = 0):
-        n = len(FEATURES)
+    def __init__(self, seed: int = 0, n_features: int | None = None):
+        n = n_features or len(FEATURES)
         self.model = MLPRegressor(hidden_layer_sizes=(24, 8, 24), activation="tanh", alpha=1e-4,
                                   learning_rate_init=3e-3, max_iter=120, batch_size=256,
                                   early_stopping=True, n_iter_no_change=8, random_state=seed)

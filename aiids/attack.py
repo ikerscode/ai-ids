@@ -83,10 +83,16 @@ def map_unknown(flow: dict, top_features: list[str]) -> dict:
     feats = set(top_features)
     port = int(flow.get("dst_port", 0))
     internal_dst = is_internal(flow.get("dst_ip", ""))
+    fanout = {"ctx_src_dports_60s", "ctx_src_dsts_60s", "win_pair_dports_300s"} | {
+        f"win_src_{k}_{w}" for k in ("dports", "dsts", "fail") for w in ("10s", "60s", "300s")}
+    repeats = {"ctx_src_flows_60s", "ctx_pair_flows_1h", "win_pair_flows_60s", "win_pair_flows_300s",
+               "win_src_samesize_60s"} | {f"win_src_flows_{w}" for w in ("10s", "60s", "300s")}
     rules = [
-        ({"ctx_src_dports_60s", "ctx_src_dsts_60s"}, "T1046", "fan-out to many ports/hosts in the last minute"),
-        ({"ctx_pair_iat_cv", "ctx_pair_flows_1h"}, "T1071.001", "connections to the same peer repeat on a regular period"),
-        ({"ctx_dst_flows_60s", "syn_cnt", "pkts_per_s"}, "T1498.001", "unusual connection rate towards one destination"),
+        (fanout, "T1046", "fan-out to many ports/hosts or many failed probes in a short window"),
+        ({"ctx_pair_iat_cv", "ctx_pair_flows_1h", "win_pair_gap_cv_300s"}, "T1071.001",
+         "connections to the same peer repeat on a regular period"),
+        ({"ctx_dst_flows_60s", "syn_cnt", "pkts_per_s", "win_dst_flows_60s", "win_dst_srcs_60s"}, "T1498.001",
+         "unusual connection rate towards one destination"),
     ]
     if port == 53 and feats & {"fwd_len_mean", "fwd_bytes", "fwd_len_max", "ctx_src_flows_60s"}:
         out = technique("T1071.004")
@@ -96,9 +102,9 @@ def map_unknown(flow: dict, top_features: list[str]) -> dict:
         out = technique("T1021.002")
         out["rationale"] = "SMB/RPC to an internal peer this host does not normally use."
         return out
-    if port in (22, 3389, 5985) and feats & {"ctx_src_flows_60s", "ctx_pair_flows_1h"}:
+    if port in (21, 22, 23, 3389, 5985) and feats & ({"ctx_src_flows_60s", "ctx_pair_flows_1h"} | repeats):
         out = technique("T1110")
-        out["rationale"] = "Repeated remote-admin sessions from one source."
+        out["rationale"] = "Repeated login sessions (FTP, SSH, Telnet, RDP, WinRM) from one source."
         return out
     for keys, tid, why in rules:
         if feats & keys:

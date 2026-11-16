@@ -1,10 +1,13 @@
 """Paths and tunable settings in one place."""
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 DATASET_DIR = DATA_DIR / "datasets"
-MODEL_DIR = DATA_DIR / "models"
+# AIIDS_MODEL_DIR lets an evaluation on a public dataset keep its models away from the
+# simulator models the HUD uses (e.g. AIIDS_MODEL_DIR=data/models.cic2017-tl).
+MODEL_DIR = Path(os.environ["AIIDS_MODEL_DIR"]).resolve() if os.environ.get("AIIDS_MODEL_DIR") else DATA_DIR / "models"
 UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "aiids.sqlite"
 

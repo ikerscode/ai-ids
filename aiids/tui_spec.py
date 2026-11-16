@@ -14,6 +14,12 @@ SPEC = {
          "columns": [["id", 10], ["severity", 9], ["score", 7], ["title", 44], ["n_alerts", 8]],
          "detail": "/api/incidents/{id}"},
         {"name": "Models", "endpoint": "/api/models"},
+        {"name": "Benchmark", "endpoint": "/api/benchmarks", "rows": "lofo",
+         "columns": [["split", 7], ["windows", 8], ["held_out", 15], ["test_flows", 10], ["recall_when_trained", 10],
+                     ["recall_held_out", 10], ["via_anomaly_layer", 10], ["benign_fpr", 10]]},
+        {"name": "Campaigns", "endpoint": "/api/benchmarks", "rows": "campaigns",
+         "columns": [["windows", 8], ["campaign", 36], ["flows_alerted", 9], ["alerts", 7], ["incidents", 9],
+                     ["best_severity", 9], ["best_stages", 40]]},
         {"name": "Status", "endpoint": "/api/status"},
     ],
     "actions": [

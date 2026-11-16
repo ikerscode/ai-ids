@@ -23,7 +23,8 @@ from .attack import map_family, map_unknown
 from .detectors import BASELINE_COMPONENTS, RATE_FEATURES, VOLUME_FEATURES, EntityBaseline, port_key
 from .engine import UNKNOWN
 from .models import ModelBundle
-from .schema import FEATURES, PORT_CLASS_NAMES, is_internal
+from .schema import PORT_CLASS_NAMES, is_internal
+from .windows import WINDOW_LABELS
 
 LABELS = {
     "duration": "flow duration (s)", "fwd_pkts": "packets sent", "bwd_pkts": "packets received",
@@ -44,6 +45,7 @@ LABELS = {
     "ctx_pair_iat_cv": "regularity of repeat connections (CV)",
     "dst_port": "destination port", "peer": "peer address", "peer_port": "peer + port combination",
     "hour": "time of day",
+    **WINDOW_LABELS,
 }
 COMPONENT_FEATURE = {"port": "dst_port", "peer": "peer", "service": "peer_port", "hour": "hour"}
 SOURCE_WEIGHT = {"autoencoder": 1.0, "baseline": 1.0, "iforest": 0.7, "supervised": 1.0}
@@ -87,7 +89,8 @@ class Explainer:
         """df: flows (raw schema), res: matching Engine.detect rows. Returns one dict per row."""
         if df.empty:
             return []
-        df = df.reset_index(drop=True)
+        FEATURES = self.b.features
+        df = self.b.ensure_features(df.reset_index(drop=True))
         res = res.reset_index(drop=True)
         x = self.b.transform.transform(df)
         z = self.b.transform.scale(x)
@@ -185,13 +188,13 @@ class Explainer:
         if feat in VOLUME_FEATURES + RATE_FEATURES and feat in prof.med:
             ref = math.expm1(prof.med[feat])
         else:
-            ref = float(self.b.transform.reference(flow["dst_port_class"])[FEATURES.index(feat)])
+            ref = float(self.b.transform.reference(flow["dst_port_class"])[self.b.features.index(feat)])
             whose = f"the benign {PORT_CLASS_NAMES[int(flow['dst_port_class'])]}"
         label = LABELS.get(feat, feat)
         if feat == "dst_port_class":
             return (f"destination port class '{PORT_CLASS_NAMES[int(v)]}'", PORT_CLASS_NAMES[int(v)],
                     PORT_CLASS_NAMES[int(ref)] if int(ref) < len(PORT_CLASS_NAMES) else ref)
-        if feat == "ctx_pair_iat_cv":
+        if feat in ("ctx_pair_iat_cv", "win_pair_gap_cv_300s"):
             return (f"repeat connections are very regular (interval CV {v:.2f}, benign median {ref:.2f})"
                     if v < ref else f"interval CV {v:.2f} vs benign median {ref:.2f}", round(v, 3), round(ref, 3))
         if ref > 0 and v / ref >= 1.5:

@@ -34,18 +34,58 @@ def _attack_mask(df: pd.DataFrame) -> np.ndarray:
     return (df["label"] != BENIGN).to_numpy()
 
 
+def active_hours(ts) -> float:
+    """Hours covered by traffic: gaps longer than an hour (nights between capture days) are skipped."""
+    t = np.sort(np.asarray(ts, float))
+    if len(t) < 2:
+        return 1e-9
+    d = np.diff(t)
+    return max(float(d[d < 3600].sum()) / 3600, 1e-9)
+
+
+def weighted_metrics(df: pd.DataFrame, a: np.ndarray, y: np.ndarray) -> dict:
+    """Metrics re-weighted to the full capture when the dataset was sampled per stratum."""
+    if "weight" not in df:
+        return {}
+    w = df["weight"].to_numpy(float)
+    tp, fp = float(w[a & y].sum()), float(w[a & ~y].sum())
+    fn, tn = float(w[~a & y].sum()), float(w[~a & ~y].sum())
+    return {"precision_w": round(tp / max(tp + fp, 1e-9), 4), "recall_w": round(tp / max(tp + fn, 1e-9), 4),
+            "fpr_w": round(fp / max(fp + tn, 1e-9), 5),
+            "false_alerts_per_hour_w": round(fp / active_hours(df["ts"]), 1)}
+
+
+def clean_metrics(df: pd.DataFrame, a: np.ndarray, y: np.ndarray) -> dict:
+    """Precision/FPR with benign flows the loader tagged as probable attack traffic left out."""
+    if "label_note" not in df:
+        return {}
+    keep = y | (df["label_note"].astype(str).to_numpy() == "")
+    tp, fp = int((a & y & keep).sum()), int((a & ~y & keep).sum())
+    tn = int((~a & ~y & keep).sum())
+    out = {"precision_clean": round(tp / max(tp + fp, 1), 4), "fpr_clean": round(fp / max(fp + tn, 1), 5),
+           "tagged_benign": int((~keep).sum())}
+    if "weight" in df:
+        w = df["weight"].to_numpy(float)
+        tpw, fpw = float(w[a & y & keep].sum()), float(w[a & ~y & keep].sum())
+        tnw = float(w[~a & ~y & keep].sum())
+        out.update({"precision_clean_w": round(tpw / max(tpw + fpw, 1e-9), 4),
+                    "fpr_clean_w": round(fpw / max(fpw + tnw, 1e-9), 5)})
+    return out
+
+
 def flow_metrics(df: pd.DataFrame, res: pd.DataFrame) -> dict:
     y = _attack_mask(df)
     a = res["alert"].to_numpy()
     tp, fp = int((a & y).sum()), int((a & ~y).sum())
     fn, tn = int((~a & y).sum()), int((~a & ~y).sum())
-    hours = max((df["ts"].max() - df["ts"].min()) / 3600, 1e-9)
+    hours = active_hours(df["ts"])
     return {
         "precision": round(tp / max(tp + fp, 1), 4), "recall": round(tp / max(tp + fn, 1), 4),
         "fpr": round(fp / max(fp + tn, 1), 5),
         "pr_auc": round(float(average_precision_score(y, res["score"].to_numpy())), 4) if y.any() and (~y).any() else None,
         "alerts_per_hour": round(int(a.sum()) / hours, 2), "false_alerts_per_hour": round(fp / hours, 2),
-        "tp": tp, "fp": fp, "fn": fn, "tn": tn, "step_recall": step_recall(df, a),
+        "tp": tp, "fp": fp, "fn": fn, "tn": tn, "step_recall": step_recall(df, a), **weighted_metrics(df, a, y),
+        **clean_metrics(df, a, y),
     }
 
 
@@ -62,7 +102,7 @@ def step_recall(df: pd.DataFrame, alert: np.ndarray) -> float:
 def aggregate_metrics(df: pd.DataFrame, res: pd.DataFrame) -> dict:
     """Alert-level numbers after deduplication (what an analyst actually sees)."""
     alerts = all_alerts(df, res)
-    hours = max((df["ts"].max() - df["ts"].min()) / 3600, 1e-9)
+    hours = active_hours(df["ts"])
     false = [a for a in alerts if a["truth_attack_frac"] < 0.5]
     return {"alerts": len(alerts), "alerts_per_hour": round(len(alerts) / hours, 2),
             "false_alerts_per_hour": round(len(false) / hours, 2),
@@ -112,6 +152,7 @@ def leave_one_family_out(bundle: ModelBundle, train, val, test, rules, log=print
     rows = []
     full = Engine(bundle, rules, "feedback").detect_stream(test)
     families = sorted(set(train["label"]) - {BENIGN, "unlabelled", ""})
+    clean = (test["label_note"].astype(str) == "").to_numpy() if "label_note" in test else None
     for fam in families:
         t0 = time.time()
         b = with_supervised(bundle, train, val, (fam,))
@@ -131,6 +172,7 @@ def leave_one_family_out(bundle: ModelBundle, train, val, test, rules, log=print
             "steps_detected": f"{int(test[m].assign(h=r['alert'].to_numpy()).groupby('campaign')['h'].any().sum())}"
                               f"/{test.loc[m, 'campaign'].nunique()}",
             "benign_fpr": round(float(res.loc[benign, "alert"].mean()), 5),
+            **({"benign_fpr_clean": round(float(res.loc[benign & clean, "alert"].mean()), 5)} if clean is not None else {}),
         })
         log(f"  LOFO {fam}: held-out recall {rows[-1]['recall_held_out']:.3f} "
             f"(anomaly layer {rows[-1]['via_anomaly_layer']:.3f}) [{time.time() - t0:.1f}s]")
@@ -157,13 +199,15 @@ def per_family(test: pd.DataFrame, res: pd.DataFrame) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- full evaluation
-def run_evaluation(flows: pd.DataFrame, bundle: ModelBundle | None = None, lofo: bool = True, log=print) -> dict:
+def run_evaluation(flows: pd.DataFrame, bundle: ModelBundle | None = None, lofo: bool = True, log=print,
+                   windows: bool | None = None) -> dict:
     t0 = time.time()
     split = {s: flows[flows["split"] == s] for s in ("train", "val", "feedback", "test")}
     train, val, fb, test = split["train"], split["val"], split["feedback"], split["test"]
     test = test[test["label"] != "unlabelled"]
     if bundle is None:
-        bundle = train_bundle(train, val, log=log)
+        bundle = train_bundle(train, val, log=log, windows=windows)
+    windows = bool(bundle.meta.get("window_features", False))
     ablation, results = [], {}
     for stage in STAGES[:4]:
         res = Engine(bundle, [], stage).detect_stream(test)
@@ -176,7 +220,8 @@ def run_evaluation(flows: pd.DataFrame, bundle: ModelBundle | None = None, lofo:
     fb_res = Engine(bundle, [], "host_adaptive").detect_stream(fb) if len(fb) else pd.DataFrame()
     rules, extra = analyst_oracle(fb, fb_res) if len(fb) else ([], fb)
     log(f"  analyst oracle: {len(rules)} rules, {len(extra)} false-positive flows returned as benign")
-    fb_bundle = train_bundle(train, val, extra_benign=extra, log=lambda *a: None) if len(extra) else bundle
+    fb_bundle = (train_bundle(train, val, extra_benign=extra, log=lambda *a: None, windows=windows)
+                 if len(extra) else bundle)
     res = Engine(fb_bundle, rules, "feedback").detect_stream(test)
     results["feedback"] = res
     agg = aggregate_metrics(test, res)
@@ -190,11 +235,11 @@ def run_evaluation(flows: pd.DataFrame, bundle: ModelBundle | None = None, lofo:
         f"alerts/h={fm['alerts_per_hour']} -> aggregated alerts/h={agg['alerts_per_hour']}")
     out = {
         "evaluated_at": time.time(), "test_flows": int(len(test)),
-        "test_hours": round((test["ts"].max() - test["ts"].min()) / 3600, 2),
+        "test_hours": round(active_hours(test["ts"]), 2),
         "test_attack_flows": int(_attack_mask(test).sum()),
         "ablation": ablation, "rules_learned": rules, "extra_benign_flows": int(len(extra)),
         "final": {**fm, **agg}, "confusion": confusion(test, res), "per_family": per_family(test, res),
-        "thresholds": bundle.thresholds,
+        "thresholds": bundle.thresholds, "window_features": windows, "n_features": len(bundle.features),
     }
     if lofo:
         out["lofo"] = leave_one_family_out(fb_bundle, train, val, test, rules, log)

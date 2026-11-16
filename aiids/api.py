@@ -192,6 +192,26 @@ def models():
             "metrics": pipeline.read_json("metrics.json"), "evaluation": pipeline.read_json("eval.json")}
 
 
+@app.get("/api/benchmarks")
+def benchmarks():
+    """Public-dataset benchmark results (python -m aiids benchmark), flattened for tables."""
+    summary, lofo, incidents = [], [], []
+    for b in pipeline.list_benchmarks():
+        for run in b.get("runs", []):
+            fb = next((r for r in run["ablation"] if r["stage"] == "feedback"), run["ablation"][-1] if run["ablation"] else {})
+            held = [r["via_anomaly_layer"] for r in run.get("lofo", [])]
+            summary.append({"dataset": run["dataset"], "split": run["split"], "windows": run["window_features"],
+                            "precision": fb.get("precision"), "recall": fb.get("recall"), "fpr": fb.get("fpr"),
+                            "precision_w": fb.get("precision_w"),
+                            "mean_unseen_anomaly_recall": round(sum(held) / len(held), 4) if held else None})
+            for r in run.get("lofo", []):
+                lofo.append({"split": run["split"], "windows": run["window_features"], **r})
+        for rep in b.get("incidents", []):
+            for c in rep.get("campaigns", []):
+                incidents.append({"windows": rep.get("window_features"), **c})
+    return {"summary": summary, "lofo": lofo, "campaigns": incidents}
+
+
 @app.post("/api/detect")
 def detect(req: NameReq):
     ds = req.dataset or _active_dataset()

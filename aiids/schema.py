@@ -7,6 +7,7 @@ LABEL_COLUMNS and FEATURES.
 """
 from __future__ import annotations
 
+import functools
 import ipaddress
 import math
 from collections import Counter, deque
@@ -81,6 +82,7 @@ INTERNAL_NETS = [ipaddress.ip_network(n) for n in (
     "fc00::/7", "fe80::/10", "::1/128")]
 
 
+@functools.lru_cache(maxsize=65536)
 def is_internal(ip: str) -> bool:
     try:
         addr = ipaddress.ip_address(str(ip))

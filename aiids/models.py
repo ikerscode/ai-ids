@@ -10,7 +10,7 @@ import pandas as pd
 
 from . import config
 from .detectors import AutoencoderDetector, EntityBaseline, IForestDetector, QuantileNormaliser
-from .features import FeatureTransform
+from .features import FeatureTransform, feature_set
 from .schema import BENIGN
 from .supervised import SupervisedDetector
 
@@ -31,8 +31,25 @@ class ModelBundle:
     meta: dict = field(default_factory=dict)
 
     # ---------------------------------------------------------------- scoring
+    @property
+    def features(self) -> list[str]:
+        return self.transform.features
+
+    def ensure_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add the time-window features when the model needs them and the flows lack them.
+
+        Datasets built by the loaders already carry them (computed over the whole
+        capture); this fallback only covers ad-hoc frames, where the windows can
+        only see the flows of that frame.
+        """
+        if all(f in df.columns for f in self.features):
+            return df
+        from .windows import add_window_features
+        return add_window_features(df)
+
     def anomaly_scores(self, df: pd.DataFrame, baseline: EntityBaseline | None = None) -> dict:
         """Raw and normalised scores of the three unsupervised detectors."""
+        df = self.ensure_features(df)
         z = self.transform.scaled(df)
         bl = baseline or self.baseline
         raw = {"iforest": self.iforest.score(z), "autoencoder": self.autoencoder.score(z), "baseline": bl.score(df)}
@@ -44,7 +61,7 @@ class ModelBundle:
         n = len(df)
         if self.supervised is None:
             return {"p_attack": np.zeros(n), "family": np.array(["none"] * n, dtype=object), "family_conf": np.zeros(n)}
-        return self.supervised.predict(self.transform.transform(df))
+        return self.supervised.predict(self.transform.transform(self.ensure_features(df)))
 
     # ---------------------------------------------------------------- calibration
     def calibrate(self, val: pd.DataFrame, train_benign: pd.DataFrame) -> None:
@@ -80,20 +97,30 @@ class ModelBundle:
 
 
 def train_bundle(train: pd.DataFrame, val: pd.DataFrame, extra_benign: pd.DataFrame | None = None,
-                 exclude_families: tuple = (), seed: int = 0, log=print) -> ModelBundle:
-    """Fit every layer. Anomaly layers see benign flows only."""
+                 exclude_families: tuple = (), seed: int = 0, log=print,
+                 windows: bool | None = None) -> ModelBundle:
+    """Fit every layer. Anomaly layers see benign flows only.
+
+    windows: use the time-window features (None = use them when the flows have them).
+    """
     t0 = time.time()
     benign = train[train["label"] == BENIGN]
+    if "label_note" in benign:  # benign-labelled flows a loader flagged as probable attack traffic
+        benign = benign[benign["label_note"].astype(str) == ""]
     if extra_benign is not None and len(extra_benign):
         benign = pd.concat([benign, extra_benign], ignore_index=True)
     if len(benign) < 50:
         raise ValueError("need at least 50 benign training flows")
-    transform = FeatureTransform().fit(benign)
+    if windows is None:
+        from .windows import has_window_features
+        windows = has_window_features(train)
+    transform = FeatureTransform(feature_set(windows)).fit(benign)
     z = transform.scaled(benign)
-    log(f"training on {len(benign)} benign flows, {len(train) - (train['label'] == BENIGN).sum()} attack flows")
+    log(f"training on {len(benign)} benign flows, {len(train) - (train['label'] == BENIGN).sum()} attack flows, "
+        f"{len(transform.features)} features{' (with time windows)' if windows else ''}")
     iforest = IForestDetector(seed).fit(z)
     ae_idx = np.random.default_rng(seed).permutation(len(z))[:20000]
-    autoencoder = AutoencoderDetector(seed).fit(z[ae_idx])
+    autoencoder = AutoencoderDetector(seed, n_features=len(transform.features)).fit(z[ae_idx])
     log(f"  isolation forest + autoencoder fitted ({time.time() - t0:.1f}s)")
     baseline = EntityBaseline().fit(benign)
     log(f"  per-entity baselines: {len(baseline.profiles) - 1} entities")
@@ -111,6 +138,7 @@ def train_bundle(train: pd.DataFrame, val: pd.DataFrame, extra_benign: pd.DataFr
     bundle.calibrate(val, benign)
     bundle.meta = {"trained_at": time.time(), "train_flows": int(len(train)), "benign_flows": int(len(benign)),
                    "excluded_families": list(exclude_families), "seconds": round(time.time() - t0, 1),
+                   "window_features": bool(windows), "n_features": len(transform.features),
                    "classes": supervised.classes_ if supervised else [BENIGN]}
     log(f"  thresholds: tau_ens={bundle.thresholds['tau_ens']:.2f} tau_sup={bundle.thresholds['tau_sup']:.3f} "
         f"entity overrides={len(bundle.entity_tau)} ({time.time() - t0:.1f}s)")
@@ -118,6 +146,7 @@ def train_bundle(train: pd.DataFrame, val: pd.DataFrame, extra_benign: pd.DataFr
 
 
 def save_bundle(bundle: ModelBundle, name: str = "current") -> str:
+    """Write the bundle into config.MODEL_DIR (set AIIDS_MODEL_DIR to keep dataset models apart)."""
     config.ensure_dirs()
     path = config.MODEL_DIR / f"{name}.joblib"
     joblib.dump(bundle, path, compress=3)
