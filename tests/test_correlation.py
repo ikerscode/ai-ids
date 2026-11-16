@@ -45,3 +45,42 @@ def test_external_alert_joins_by_ip_and_hostname():
                 sensor="hostlog-web01")]
     incs = Correlator().correlate(alerts)
     assert len(incs) == 1 and incs[0]["n_alerts"] == 3
+
+
+def _pipeline_alert(i, **fields):
+    """An alert as the cross-lab pipeline sends it (ExternalAlert JSON), normalised like /api/ingest does."""
+    from aiids.ingest import ExternalAlert, to_alert
+    out = to_alert(ExternalAlert(**fields))
+    out["id"] = i
+    return out
+
+
+def test_pipeline_malware_and_ics_alerts_share_one_incident():
+    """Malware on CORP-WS-37 and the blocked Modbus writes from CORP-WS-37 are one IT-to-OT incident."""
+    t = 1_794_844_000.0
+    alerts = [
+        _pipeline_alert(1, source="malware-lab", category="malware_exec", ts=t + 14, src_host="CORP-WS-37",
+                        severity="critical", confidence=0.94, technique_id="T1204", stage="execution_persistence"),
+        _pipeline_alert(2, source="malware-lab", category="c2_beacon", ts=t + 15, src_host="CORP-WS-37",
+                        dst_ip="203.0.113.50", dst_port=8443, severity="critical", confidence=0.94,
+                        technique_id="T1071.001", stage="command_and_control"),
+        # ICS fast runs are back-dated a minute and name the sim's host, case as the lab prints it
+        _pipeline_alert(3, source="ics-sim", category="modbus_blocked", ts=t - 40, src_host="corp-ws-37",
+                        dst_host="PLC-01", severity="high", technique_id="T0855", stage="exfil_impact"),
+        _pipeline_alert(4, source="ics-sim", category="modbus_blocked", ts=t + 21, src_host="CORP-WS-37",
+                        dst_host="PLC-01", severity="high", technique_id="T0855", stage="exfil_impact"),
+        # unrelated: another sample that was never placed on a host, and another workstation near the PLC
+        _pipeline_alert(5, source="malware-lab", category="malware_exec", ts=t + 14, src_host="sample-56dba89dfbb8",
+                        severity="critical", confidence=0.94, stage="execution_persistence"),
+        _pipeline_alert(6, source="honeypot-net", category="ssh_bruteforce", ts=t + 30, src_ip="129.98.51.17",
+                        dst_host="web01", severity="high"),
+        _pipeline_alert(7, source="malware-lab", category="malware_exec", ts=t + 18, src_host="CORP-WS-12",
+                        severity="high", confidence=0.7, stage="execution_persistence"),
+    ]
+    incs = Correlator().correlate(alerts)
+    chain = [i for i in incs if 1 in i["alert_ids"]]
+    assert len(chain) == 1
+    assert sorted(chain[0]["alert_ids"]) == [1, 2, 3, 4]
+    assert chain[0]["systems"] == ["ics-sim", "malware-lab"]
+    assert {5, 6, 7}.isdisjoint(chain[0]["alert_ids"])
+    assert len(incs) == 4
